@@ -10,7 +10,8 @@ import math
 import re
 import streamlit.components.v1 as components
 import concurrent.futures
-import os  # 新增：用於處理實體檔案路徑
+import os
+import json # 新增：用於持久化儲存航班資料
 
 # ==========================================
 # 依賴套件檢查與匯入
@@ -36,6 +37,14 @@ except ImportError:
     Converter = None
     Solar = None
     Lunar = None
+
+# 新增：用於自動從上傳圖片中解析航班
+try:
+    from PIL import Image
+    import pytesseract
+except ImportError:
+    Image = None
+    pytesseract = None
 
 # ==========================================
 # 設定：Google Maps API Key
@@ -488,7 +497,8 @@ def get_chinese_zodiac(year):
     return zodiacs[(year - 4) % 12]
 
 def calculate_detailed_age(birth_date):
-    today = date.today()
+    # 強制使用台灣時區 (UTC+8) 計算今天日期
+    today = datetime.now(timezone(timedelta(hours=8))).date()
     delta = today - birth_date
     years = today.year - birth_date.year
     if (today.month, today.day) < (birth_date.month, birth_date.day):
@@ -507,7 +517,8 @@ def get_lunar_date_str(birth_date):
         return "N/A"
 
 def get_next_birthday_days(birth_date):
-    today = date.today()
+    # 強制使用台灣時區 (UTC+8) 計算今天日期
+    today = datetime.now(timezone(timedelta(hours=8))).date()
     this_year_bday = date(today.year, birth_date.month, birth_date.day)
     if this_year_bday < today:
         next_bday = date(today.year + 1, birth_date.month, birth_date.day)
@@ -518,7 +529,8 @@ def get_next_birthday_days(birth_date):
 def get_next_lunar_birthday_days(birth_date):
     try:
         if Converter and Solar and Lunar:
-            today = date.today()
+            # 強制使用台灣時區 (UTC+8) 計算今天日期
+            today = datetime.now(timezone(timedelta(hours=8))).date()
             solar_birth = Solar(birth_date.year, birth_date.month, birth_date.day)
             lunar_birth = Converter.Solar2Lunar(solar_birth)
             birth_lmonth = lunar_birth.month
@@ -567,6 +579,8 @@ def fetch_single_flight(flight_number):
         "BR9": {"FROM": "Vancouver (YVR)", "To": "Taipei (TPE)", "AIRCRAFT": "77W", "STD": "02:00", "STA": "05:25", "Total Time": "13h 25m"},
         "BR10": {"FROM": "Taipei (TPE)", "To": "Vancouver (YVR)", "AIRCRAFT": "77W", "STD": "23:55", "STA": "19:50", "Total Time": "10h 55m"},
         "BR117": {"FROM": "Sapporo (CTS)", "To": "Taipei (TPE)", "AIRCRAFT": "A333", "STD": "16:15", "STA": "19:30", "Total Time": "4h 15m"},
+        "BR121": {"FROM": "Okinawa (OKA)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "11:50", "STA": "12:30", "Total Time": "1h 40m"},
+        "BR122": {"FROM": "Taipei (TPE)", "To": "Okinawa (OKA)", "AIRCRAFT": "A321", "STD": "08:15", "STA": "10:45", "Total Time": "1h 30m"},
         "BR129": {"FROM": "Osaka (KIX)", "To": "Taipei (TPE)", "AIRCRAFT": "781", "STD": "18:30", "STA": "20:30", "Total Time": "3h 00m"},
         "BR130": {"FROM": "Taipei (TPE)", "To": "Osaka (KIX)", "AIRCRAFT": "781", "STD": "13:35", "STA": "17:15", "Total Time": "2h 40m"},
         "BR131": {"FROM": "Osaka (KIX)", "To": "Taipei (TPE)", "AIRCRAFT": "77W", "STD": "13:10", "STA": "15:05", "Total Time": "2h 55m"},
@@ -575,6 +589,8 @@ def fetch_single_flight(flight_number):
         "BR158": {"FROM": "Taipei (TPE)", "To": "Komatsu (KMQ)", "AIRCRAFT": "A321", "STD": "06:35", "STA": "10:25", "Total Time": "2h 50m"},
         "BR159": {"FROM": "Seoul (ICN)", "To": "Taipei (TPE)", "AIRCRAFT": "A333", "STD": "19:45", "STA": "21:40", "Total Time": "2h 55m"},
         "BR160": {"FROM": "Taipei (TPE)", "To": "Seoul (ICN)", "AIRCRAFT": "A333", "STD": "15:15", "STA": "18:45", "Total Time": "2h 30m"},
+        "BR163": {"FROM": "Seoul (ICN)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "20:40", "STA": "22:30", "Total Time": "2h 50m"},
+        "BR164": {"FROM": "Taipei (TPE)", "To": "Seoul (ICN)", "AIRCRAFT": "A321", "STD": "16:30", "STA": "20:00", "Total Time": "2h 30m"},
         "BR165": {"FROM": "Seoul (ICN)", "To": "Kaohsiung (KHH)", "AIRCRAFT": "A321", "STD": "12:00", "STA": "14:15", "Total Time": "3h 15m"},
         "BR166": {"FROM": "Kaohsiung (KHH)", "To": "Seoul (ICN)", "AIRCRAFT": "A321", "STD": "07:00", "STA": "10:55", "Total Time": "2h 55m"},
         "BR169": {"FROM": "Seoul (ICN)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "11:40", "STA": "13:30", "Total Time": "2h 50m"},
@@ -595,8 +611,12 @@ def fetch_single_flight(flight_number):
         "BR386": {"FROM": "Hanoi (HAN)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "18:30", "STA": "22:20", "Total Time": "2h 50m"},
         "BR397": {"FROM": "Hanoi (HAN)", "To": "Taipei (TPE)", "AIRCRAFT": "77W", "STD": "12:05", "STA": "15:55", "Total Time": "2h 50m"},
         "BR398": {"FROM": "Taipei (TPE)", "To": "Hanoi (HAN)", "AIRCRAFT": "77W", "STD": "09:15", "STA": "11:05", "Total Time": "2h 50m"},
+        "BR721": {"FROM": "Shanghai (PVG)", "To": "Taipei (TPE)", "AIRCRAFT": "77W", "STD": "20:05", "STA": "22:00", "Total Time": "1h 55m"},
+        "BR722": {"FROM": "Taipei (TPE)", "To": "Shanghai (PVG)", "AIRCRAFT": "77W", "STD": "16:30", "STA": "18:35", "Total Time": "2h 05m"},
         "BR757": {"FROM": "Hangzhou (HGH)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "19:35", "STA": "21:30", "Total Time": "1h 55m"},
         "BR758": {"FROM": "Taipei (TPE)", "To": "Hangzhou (HGH)", "AIRCRAFT": "A321", "STD": "16:25", "STA": "18:15", "Total Time": "1h 50m"},
+        "BR765": {"FROM": "Taipei (TPE)", "To": "Chengdu (TFU)", "AIRCRAFT": "A321", "STD": "16:20", "STA": "20:15", "Total Time": "3h 55m"},
+        "BR766": {"FROM": "Chengdu (TFU)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "21:30", "STA": "00:50", "Total Time": "3h 20m"},
         "BR771": {"FROM": "Shanghai (SHA)", "To": "Taipei (TSA)", "AIRCRAFT": "78X", "STD": "19:40", "STA": "21:45", "Total Time": "2h 05m"},
         "BR772": {"FROM": "Taipei (TSA)", "To": "Shanghai (SHA)", "AIRCRAFT": "78X", "STD": "14:40", "STA": "16:30", "Total Time": "1h 50m"},
         "BR805": {"FROM": "Macau (MFM)", "To": "Taipei (TPE)", "AIRCRAFT": "A321", "STD": "13:15", "STA": "15:00", "Total Time": "1h 45m"},
@@ -751,6 +771,31 @@ with tab1:
             f.write(uploaded_file.getbuffer())
         st.success("✅ 班表已成功上傳！現在別人打開網址也會看到這張圖表。")
 
+        # --- 新增：自動辨識圖片中的航班並擴充清單 ---
+        if Image is not None and pytesseract is not None:
+            try:
+                img = Image.open(SCHEDULE_FILE)
+                text = pytesseract.image_to_string(img)
+                # 尋找所有類似 BR123, br891 的字串
+                found_flights = re.findall(r'BR\d{1,4}', text, re.IGNORECASE)
+                if found_flights:
+                    found_flights = [f.upper() for f in found_flights]
+                    
+                    saved_list = []
+                    if os.path.exists("known_flights.json"):
+                        with open("known_flights.json", "r", encoding="utf-8") as jf:
+                            saved_list = json.load(jf)
+                            
+                    new_added = [f for f in set(found_flights) if f not in saved_list]
+                    
+                    if new_added:
+                        saved_list.extend(new_added)
+                        with open("known_flights.json", "w", encoding="utf-8") as jf:
+                            json.dump(saved_list, jf)
+                        st.success(f"🔍 自動從新班表中擷取並新增了 {len(new_added)} 個新航班：{', '.join(new_added)}")
+            except Exception as e:
+                pass
+                
     # 顯示圖片：改成檢查實體檔案是否存在
     if os.path.exists(SCHEDULE_FILE):
         st.image(SCHEDULE_FILE, use_column_width=True)
@@ -766,7 +811,7 @@ with tab1:
     # 創建所有航班的按鈕與報表
     st.markdown("### 🔘 航班快捷按鈕 & 報表")
     
-    # CSS調整：增加今日專屬航班按鈕樣式 (flight-btn-today)
+    # CSS調整：增加今日專屬航班按鈕樣式 (flight-btn-today) - 已修改為海軍藍+白字
     st.markdown("""
         <style>
         .flight-btn-red {
@@ -793,8 +838,8 @@ with tab1:
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            background-color: #ff9800; /* 顯眼的橘黃色代表今天航班 */
-            color: #000000 !important;
+            background-color: #003366; /* 海軍藍色 Navy Blue */
+            color: #ffffff !important; /* 白色字體 */
             padding: 6px 14px;
             border-radius: 4px;
             text-decoration: none !important;
@@ -803,7 +848,7 @@ with tab1:
             box-shadow: 0 4px 6px rgba(0,0,0,0.2);
             transition: opacity 0.3s, transform 0.2s;
             min-width: 80px;
-            border: 2px solid #e65100;
+            border: 2px solid #001a33; /* 更深的邊框加強立體感 */
         }
         .flight-btn-today:hover {
             opacity: 0.85;
@@ -818,27 +863,27 @@ with tab1:
         </style>
     """, unsafe_allow_html=True)
 
-    # 建立 2026年3月 班表資料庫 (依照你上傳的圖片資料)
+    # 建立 2026年3月 班表資料庫 (依照你上傳的圖片資料，加入機型資訊)
     SCHEDULE_MAR_2026 = {
-        date(2026, 3, 2): ["BR178", "BR177"],
-        date(2026, 3, 3): ["BR265", "BR266"],
-        date(2026, 3, 4): ["BR160", "BR159"],
-        date(2026, 3, 6): ["BR397", "BR398"],
-        date(2026, 3, 7): ["BR869", "BR870"],
-        date(2026, 3, 8): ["BR867", "BR868"],
-        date(2026, 3, 12): ["BR805", "BR806"],
-        date(2026, 3, 13): ["BR758", "BR757"],
-        date(2026, 3, 15): ["BR178", "BR177"],
-        date(2026, 3, 18): ["BR10"],
-        date(2026, 3, 20): ["BR9"],
-        date(2026, 3, 21): ["BR9"],
-        date(2026, 3, 29): ["BR166", "BR165"],
-        date(2026, 3, 30): ["BR130", "BR129"],
-        date(2026, 3, 31): ["BR277", "BR278"],
+        date(2026, 3, 2): {"flights": ["BR178", "BR177"], "aircraft": "B78N"},
+        date(2026, 3, 3): {"flights": ["BR265", "BR266"], "aircraft": "A333"},
+        date(2026, 3, 4): {"flights": ["BR160", "BR159"], "aircraft": "B78P"},
+        date(2026, 3, 6): {"flights": ["BR397", "BR398"], "aircraft": "B77A"},
+        date(2026, 3, 7): {"flights": ["BR869", "BR870"], "aircraft": "A321"},
+        date(2026, 3, 8): {"flights": ["BR867", "BR868"], "aircraft": "B78P"},
+        date(2026, 3, 12): {"flights": ["BR805", "BR806"], "aircraft": "A333"},
+        date(2026, 3, 13): {"flights": ["BR758", "BR757"], "aircraft": "B78N"},
+        date(2026, 3, 15): {"flights": ["BR178", "BR177"], "aircraft": "B78N"},
+        date(2026, 3, 18): {"flights": ["BR10"], "aircraft": "B77B"},
+        date(2026, 3, 20): {"flights": ["BR9"], "aircraft": "B77B"},
+        date(2026, 3, 21): {"flights": ["BR9"], "aircraft": "B77B"},
+        date(2026, 3, 29): {"flights": ["BR166", "BR165"], "aircraft": "A321"},
+        date(2026, 3, 30): {"flights": ["BR130", "BR129"], "aircraft": "B781"},
+        date(2026, 3, 31): {"flights": ["BR277", "BR278"], "aircraft": "A333"},
     }
 
     # 合併舊有與新增的航班清單 (已去除重複的BR891, BR892)
-    flights = [
+    base_flights = [
         "BR178", "BR177", "BR265", "BR266", "BR160", "BR159", "BR397", "BR398", "BR6535",
         "BR869", "BR870", "BR867", "BR868", "BR805", "BR806", "BR758", "BR757", 
         "BR10", "BR9", "BR166", "BR165", "BR130", "BR129", "BR277", "BR278",
@@ -847,6 +892,31 @@ with tab1:
         "BR157", "BR233", "BR234",
         "BR722", "BR721", "BR765", "BR766", "BR122", "BR121", "BR164", "BR163"
     ]
+    
+    # -----------------------------------------------------------
+    # 新增機制：匯整所有紀錄到的航班 (從硬編碼清單 + 持久化 JSON + 當前班表)
+    # -----------------------------------------------------------
+    saved_flights = []
+    if os.path.exists("known_flights.json"):
+        try:
+            with open("known_flights.json", "r", encoding="utf-8") as f:
+                saved_flights = json.load(f)
+        except:
+            pass
+            
+    schedule_flights = []
+    for d, info in SCHEDULE_MAR_2026.items():
+        schedule_flights.extend(info["flights"])
+        
+    # 利用 set 聯集確保所有來源的航班都能不重複保留，實現「只會變多不會變少」
+    all_unique_flights = list(set(base_flights + saved_flights + schedule_flights))
+    
+    # 重新寫回 json 檔保存記錄
+    with open("known_flights.json", "w", encoding="utf-8") as f:
+        json.dump(all_unique_flights, f)
+
+    flights = all_unique_flights
+    # -----------------------------------------------------------
     
     # 按照數字大小排序航班 (例如: BR9 -> BR10 -> BR129...)
     flights = sorted(flights, key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else float('inf'))
@@ -862,9 +932,11 @@ with tab1:
     with col_btns:
         btn_html = '<div class="flight-btn-container">'
         
-        # 取得今天日期，並找出今天的航班陣列 (若想測試3月2號效果，可將此行暫時改為 today_date = date(2026, 3, 2))
-        today_date = date.today()
-        today_flights = SCHEDULE_MAR_2026.get(today_date, [])
+        # 取得今天日期，強制設定為台灣時間 (UTC+8)，解決 Streamlit Cloud 伺服器時區導致的日期誤差問題
+        today_date = datetime.now(timezone(timedelta(hours=8))).date()
+        today_data = SCHEDULE_MAR_2026.get(today_date, {"flights": [], "aircraft": ""})
+        today_flights = today_data.get("flights", [])
+        today_aircraft = today_data.get("aircraft", "")
         
         for flight in flights:
             # 確保若有未預期情況，皆提供 FlightAware 網址
@@ -885,10 +957,45 @@ with tab1:
     with col_table:
         # 依據按鈕順序產出對應的 DataFrame
         df_report = pd.DataFrame([all_flight_data[f] for f in flights])
+        
+        # --- 新增邏輯：以班表機型為主，常態/網路查詢為輔 ---
+        schedule_aircraft_map = {}
+        # 先將整個月份的班表機型寫入字典
+        for d, info in SCHEDULE_MAR_2026.items():
+            for f in info["flights"]:
+                schedule_aircraft_map[f] = info["aircraft"]
+        # 確保今天的機型優先覆蓋 (以防同一個航班在不同天有不同機型，這裡確保至少今天顯示的必定是今天的機型)
+        for f in today_flights:
+            schedule_aircraft_map[f] = today_aircraft
+            
+        # 替換 df_report 中的機型
+        df_report['AIRCRAFT'] = df_report.apply(
+            lambda row: schedule_aircraft_map[row['Flight']] if row['Flight'] in schedule_aircraft_map else row['AIRCRAFT'], 
+            axis=1
+        )
+        # ------------------------------------------------
+
         # 依照需求指定欄位排列順序：加入 "Total Time" 顯示在最右側
         df_report = df_report[["Flight", "FROM", "To", "AIRCRAFT", "STD", "STA", "Total Time"]]
+        
+        # --- 新增排序邏輯：將今日航班移至最上層 ---
+        # 利用 isin 判斷過濾今日航班與其餘航班，再進行 concat 合併，確保依然享有依數字大小排序的規則
+        df_today = df_report[df_report["Flight"].isin(today_flights)]
+        df_other = df_report[~df_report["Flight"].isin(today_flights)]
+        df_report = pd.concat([df_today, df_other], ignore_index=True)
+        
+        # --- 新增：將今日航班整行用顯眼顏色標註起來 ---
+        def highlight_today_flights(row):
+            if row['Flight'] in today_flights:
+                # 亮黃色底搭配深紅粗體字，十分顯眼
+                return ['background-color: #FFF9C4; color: #D32F2F; font-weight: bold;'] * len(row)
+            return [''] * len(row)
+            
+        # 套用樣式到 DataFrame
+        styled_report = df_report.style.apply(highlight_today_flights, axis=1)
+
         # 使用 st.dataframe 呈現出類似 Excel 報表的質感
-        st.dataframe(df_report, use_container_width=True, hide_index=True)
+        st.dataframe(styled_report, use_container_width=True, hide_index=True)
 
 
 # ------------------------------------------------------------------
@@ -1006,7 +1113,8 @@ with tab2:
 # TAB 3: 家族時光
 # ------------------------------------------------------------------
 with tab3:
-    st.caption(f"<span style='font-size: 18px;'>今天是 {date.today().strftime('%Y年%m月%d日')}</span>", unsafe_allow_html=True)
+    # 這裡的標題日期也同步更換為台灣時間，防止跨夜誤差
+    st.caption(f"<span style='font-size: 18px;'>今天是 {datetime.now(timezone(timedelta(hours=8))).date().strftime('%Y年%m月%d日')}</span>", unsafe_allow_html=True)
 
     if not st.session_state.family_data:
         st.info("目前沒有資料，請從左側新增成員。")
@@ -1045,7 +1153,7 @@ with tab3:
         upcoming = df_birthday_sorted.iloc[0]
         
         b_date_obj_upcoming = datetime.strptime(upcoming['國曆生日'], "%Y/%m/%d").date()
-        days_mod_upcoming = (date.today() - b_date_obj_upcoming).days % 365
+        days_mod_upcoming = (datetime.now(timezone(timedelta(hours=8))).date() - b_date_obj_upcoming).days % 365
         
         top_col1, top_col2 = st.columns([2, 1])
         
@@ -1184,7 +1292,7 @@ with tab3:
                         
                         with cols[loc_idx % 3]:
                             b_date_obj_row = datetime.strptime(row['國曆生日'], "%Y/%m/%d").date()
-                            days_mod_row = (date.today() - b_date_obj_row).days % 365
+                            days_mod_row = (datetime.now(timezone(timedelta(hours=8))).date() - b_date_obj_row).days % 365
 
                             html_card = f"""
                             <div class="birthday-card">
